@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "subtitld-addon-omnivoice"
+version = "26.11.1"
+description = "Subtitld add-on: text-to-speech and voice cloning in 600+ languages with k2-fsa's OmniVoice"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Subtitld", email = "jbopen@gmail.com" }]
+requires-python = ">=3.10"
+
+# Speech is audio.cpp, built by tools/build_native.py into build/assets/ and
+# loaded with ctypes; reference clips that are not WAV go through the host's
+# ffmpeg; the download uses the standard library. Nothing else is needed.
+dependencies = []
+
+[project.optional-dependencies]
+build = ["pyinstaller>=6.10"]
+dev = ["pytest>=7.4"]
+
+[project.scripts]
+omnivoice-addon = "omnivoice_addon.__main__:main"
+
+[tool.setuptools]
+packages = ["omnivoice_addon"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["weights: needs the 1.35 GB OmniVoice model, named by OMNIVOICE_TEST_MODEL (local runs only)"]

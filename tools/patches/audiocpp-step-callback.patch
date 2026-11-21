@@ -1,0 +1,185 @@
+diff --git a/include/audiocpp.h b/include/audiocpp.h
+index 26de176..3e61153 100644
+--- a/include/audiocpp.h
++++ b/include/audiocpp.h
+@@ -1,4 +1,7 @@
+ /*
++ * Modified by Subtitld: AUDIOCPP_ERR_CANCELLED and
++ * audiocpp_session_set_step_callback.
++ *
+  * audiocpp.h — C ABI for embedding audio.cpp in-process.
+  *
+  * This is a thin facade over engine::runtime. It adds no behaviour of its own:
+@@ -76,7 +79,8 @@ typedef enum audiocpp_status {
+     AUDIOCPP_ERR_RUNTIME = 4,
+     AUDIOCPP_ERR_OUT_OF_MEMORY = 5,
+     AUDIOCPP_ERR_OUT_OF_RANGE = 6,
+-    AUDIOCPP_ERR_NOT_AVAILABLE = 7
++    AUDIOCPP_ERR_NOT_AVAILABLE = 7,
++    AUDIOCPP_ERR_CANCELLED = 8
+ } audiocpp_status;
+ 
+ /* Detail for the most recent failure on this thread. Read it immediately after
+@@ -292,6 +296,15 @@ AUDIOCPP_API const char * audiocpp_session_family(const audiocpp_session * sessi
+ AUDIOCPP_API audiocpp_status audiocpp_session_prepare(audiocpp_session * session,
+                                                       const audiocpp_request * request);
+ 
++/* Called on the calling thread before each generated step of
++ * audiocpp_session_run, for families that report steps (OmniVoice: one per
++ * diffusion step, counted from 0, and from 0 again for each long-form chunk).
++ * Return nonzero to stop the run, which then returns AUDIOCPP_ERR_CANCELLED.
++ * NULL removes the callback. */
++typedef int (*audiocpp_step_callback)(int64_t step, void * user_data);
++AUDIOCPP_API audiocpp_status audiocpp_session_set_step_callback(audiocpp_session * session,
++                                                                audiocpp_step_callback callback,
++                                                                void * user_data);
+ AUDIOCPP_API audiocpp_status audiocpp_session_run(audiocpp_session * session,
+                                                   const audiocpp_request * request,
+                                                   audiocpp_result ** out_result);
+diff --git a/include/engine/framework/runtime/step_hook.h b/include/engine/framework/runtime/step_hook.h
+new file mode 100644
+index 0000000..6d5daa0
+--- /dev/null
++++ b/include/engine/framework/runtime/step_hook.h
+@@ -0,0 +1,46 @@
++// Added by Subtitld (not part of upstream audio.cpp).
++// Copyright 2026 Subtitld contributors
++// SPDX-License-Identifier: Apache-2.0
++//
++// A per-thread hook that generation loops call once per generated step, so an
++// embedder can report progress and stop a run between two steps. The C API
++// installs it around audiocpp_session_run (audiocpp_session_set_step_callback).
++#pragma once
++
++#include <cstdint>
++#include <functional>
++#include <stdexcept>
++
++namespace engine::runtime {
++
++// Thrown out of a run when the step hook asks it to stop.
++class RunCancelled : public std::runtime_error {
++public:
++    RunCancelled() : std::runtime_error("cancelled") {}
++};
++
++// Returns true to stop the run.
++using StepHook = std::function<bool(int64_t step)>;
++
++inline thread_local const StepHook * t_step_hook = nullptr;
++
++// Called by a generation loop before each step; throws RunCancelled on a stop.
++inline void report_step(int64_t step) {
++    if (t_step_hook != nullptr && *t_step_hook && (*t_step_hook)(step)) {
++        throw RunCancelled();
++    }
++}
++
++// Installs `hook` on this thread for its lifetime.
++class ScopedStepHook {
++public:
++    explicit ScopedStepHook(const StepHook * hook) : previous_(t_step_hook) { t_step_hook = hook; }
++    ~ScopedStepHook() { t_step_hook = previous_; }
++    ScopedStepHook(const ScopedStepHook &) = delete;
++    ScopedStepHook & operator=(const ScopedStepHook &) = delete;
++
++private:
++    const StepHook * previous_;
++};
++
++} // namespace engine::runtime
+diff --git a/src/capi/audiocpp.cpp b/src/capi/audiocpp.cpp
+index ab64f7f..243437a 100644
+--- a/src/capi/audiocpp.cpp
++++ b/src/capi/audiocpp.cpp
+@@ -1,4 +1,7 @@
+ /*
++ * Modified by Subtitld: AUDIOCPP_ERR_CANCELLED and
++ * audiocpp_session_set_step_callback.
++ *
+  * C ABI facade over engine::runtime.
+  *
+  * This file adds no model behaviour. It handles:
+@@ -17,6 +20,7 @@
+ #include <ggml.h>
+ 
+ #include "engine/framework/runtime/task_vocabulary.h"
++#include "engine/framework/runtime/step_hook.h"
+ 
+ #include "engine/framework/debug/trace.h"
+ #include "engine/framework/core/backend.h"
+@@ -164,6 +168,9 @@ audiocpp_status guard(Fn && fn, audiocpp_status runtime_status = AUDIOCPP_ERR_RU
+     try {
+         g_last_error.clear();
+         return fn();
++    } catch (const rt::RunCancelled & e) {
++        g_last_error = e.what();
++        return AUDIOCPP_ERR_CANCELLED;
+     } catch (const std::bad_alloc & e) {
+         g_last_error = e.what();
+         return AUDIOCPP_ERR_OUT_OF_MEMORY;
+@@ -287,6 +294,8 @@ struct audiocpp_session {
+     std::unique_ptr<rt::IVoiceTaskSession> session;
+     rt::RunMode mode = rt::RunMode::Offline;
+     std::string family;
++    audiocpp_step_callback step_callback = nullptr;
++    void * step_user_data = nullptr;
+ 
+     rt::IOfflineVoiceTaskSession & offline() const {
+         auto * offline = dynamic_cast<rt::IOfflineVoiceTaskSession *>(session.get());
+@@ -388,6 +397,7 @@ const char * audiocpp_status_string(audiocpp_status status) {
+         case AUDIOCPP_ERR_OUT_OF_MEMORY: return "out of memory";
+         case AUDIOCPP_ERR_OUT_OF_RANGE: return "index out of range";
+         case AUDIOCPP_ERR_NOT_AVAILABLE: return "not available";
++        case AUDIOCPP_ERR_CANCELLED: return "cancelled";
+     }
+     return "unknown status";
+ }
+@@ -694,6 +704,17 @@ audiocpp_status audiocpp_session_prepare(audiocpp_session * session, const audio
+     });
+ }
+ 
++audiocpp_status audiocpp_session_set_step_callback(audiocpp_session * session,
++                                                   audiocpp_step_callback callback,
++                                                   void * user_data) {
++    if (session == nullptr) {
++        return fail(AUDIOCPP_ERR_INVALID_ARGUMENT, "session must be non-null");
++    }
++    session->step_callback = callback;
++    session->step_user_data = user_data;
++    return AUDIOCPP_OK;
++}
++
+ audiocpp_status audiocpp_session_run(audiocpp_session * session,
+                                      const audiocpp_request * request,
+                                      audiocpp_result ** out_result) {
+@@ -713,6 +734,10 @@ audiocpp_status audiocpp_session_run(audiocpp_session * session,
+          * leave the session sized for the wrong input. */
+         session->session->prepare(rt::build_preparation_request(task_request));
+ 
++        const rt::StepHook hook = [session](int64_t step) {
++            return session->step_callback != nullptr && session->step_callback(step, session->step_user_data) != 0;
++        };
++        const rt::ScopedStepHook scoped(session->step_callback != nullptr ? &hook : nullptr);
+         auto handle = std::make_unique<audiocpp_result>();
+         handle->result = session->offline().run(task_request);
+         *out_result = handle.release();
+diff --git a/src/models/omnivoice/generator.cpp b/src/models/omnivoice/generator.cpp
+index 33a7dd4..71fa383 100644
+--- a/src/models/omnivoice/generator.cpp
++++ b/src/models/omnivoice/generator.cpp
+@@ -1,4 +1,6 @@
++// Modified by Subtitld: calls engine::runtime::report_step once per diffusion step.
+ #include "engine/models/omnivoice/generator.h"
++#include "engine/framework/runtime/step_hook.h"
+ 
+ #include "engine/framework/assets/tensor_source.h"
+ #include "engine/framework/debug/profiler.h"
+@@ -2186,6 +2188,7 @@ std::vector<OmniVoiceGeneratedAudioTokens> OmniVoiceQwen3DiffusionRuntime::gener
+     std::vector<std::vector<Candidate>> candidates(batch);
+     std::vector<GreedySlot> greedy_slots;
+     for (int64_t step = 0; step < max_steps; ++step) {
++        engine::runtime::report_step(step);
+         bool any_fill = false;
+         for (size_t item = 0; item < batch; ++item) {
+             const auto & state = items[item];
