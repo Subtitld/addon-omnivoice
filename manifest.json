@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "omnivoice",
   "version": "26.11.1",
-  "display_name": "OmniVoice (offline, voice clone, 600+ languages)",
+  "display_name": "OmniVoice (offline, voice clone, 600+ languages, non-commercial)",
   "summary": "k2-fsa's OmniVoice speaks more than 600 languages, in the speaker's own voice cloned from the video, across languages, or in a voice designed from a few attributes. The 1.35 GB model downloads on first use and needs about 2.5 GB of memory; on a CPU each second of speech takes several seconds to make. Its weights are for non-commercial use only (CC BY-NC).",
   "author": "Subtitld",
   "homepage": "https://github.com/Subtitld/addon-omnivoice",
