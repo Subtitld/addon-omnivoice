@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "subtitld-addon-omnivoice"
-version = "26.11.1"
+version = "26.11.2"
 description = "Subtitld add-on: text-to-speech and voice cloning in 600+ languages with k2-fsa's OmniVoice"
 readme = "README.md"
 license = { text = "Apache-2.0" }
